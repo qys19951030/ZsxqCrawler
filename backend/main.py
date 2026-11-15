@@ -1982,6 +1982,7 @@ async def get_database_stats():
                         "newest_timestamp": "",
                         "has_data": False,
                     },
+                    "import_progress": [],
                 },
                 "file_database": {
                     "stats": {},
@@ -2003,6 +2004,7 @@ async def get_database_stats():
                         "newest_timestamp": "",
                         "has_data": False,
                     },
+                    "import_progress": [],
                 },
                 "file_database": {
                     "stats": {},
@@ -2011,6 +2013,7 @@ async def get_database_stats():
 
         aggregated_topic_stats: Dict[str, int] = {}
         aggregated_file_stats: Dict[str, int] = {}
+        aggregated_import_progress: list = []
 
         oldest_ts: Optional[str] = None
         newest_ts: Optional[str] = None
@@ -2032,6 +2035,10 @@ async def get_database_stats():
                 db.close()
 
             for table, count in (topic_stats or {}).items():
+                if table == "import_progress":
+                    # 批次采集进度按群组保留明细，不做数值累加
+                    aggregated_import_progress.extend(count or [])
+                    continue
                 aggregated_topic_stats[table] = aggregated_topic_stats.get(table, 0) + int(count or 0)
 
             if ts_info.get("has_data"):
@@ -2072,6 +2079,7 @@ async def get_database_stats():
             "topic_database": {
                 "stats": aggregated_topic_stats,
                 "timestamp_info": timestamp_info,
+                "import_progress": aggregated_import_progress,
             },
             "file_database": {
                 "stats": aggregated_file_stats,

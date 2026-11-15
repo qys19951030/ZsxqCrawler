@@ -541,6 +541,14 @@ class ZSXQDatabase:
                 print(f"获取表 {table} 统计信息失败: {e}")
                 stats[table] = 0
 
+        # 批次采集进度（水位、成功/失败批次数），与库统计放在一起
+        try:
+            from backend.zsxq_import_progress import ImportProgressStore
+            stats['import_progress'] = ImportProgressStore(self).list_progress()
+        except Exception as e:
+            print(f"获取采集进度统计失败: {e}")
+            stats['import_progress'] = []
+
         return stats
     
     def get_timestamp_range_info(self) -> Dict[str, Any]:
