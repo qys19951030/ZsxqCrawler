@@ -284,67 +284,104 @@ class ZSXQDatabase:
         )
         return self.cursor.fetchone() is not None
 
+    # 话题私有的子表：这些表的数据从属于某条话题，
+    # 重复导入同一话题前整体清空，保证行数与统计不重复累加。
+    TOPIC_CHILD_TABLES = (
+        'talks', 'articles', 'images', 'likes', 'like_emojis',
+        'user_liked_emojis', 'comments', 'questions', 'answers',
+        'topic_files',
+    )
+
+    def _delete_topic_children(self, topic_id: int):
+        """删除一条话题在所有子表中的残留数据（在事务内调用）。
+
+        tags 表为群组内共享表，只解除 topic_tags 关联并重算话题计数，
+        不删除标签本身。groups/users/topics 走 upsert，无需清理。
+        """
+        # 先记下关联过的标签，解除关联后重算它们的 topic_count
+        self.cursor.execute(
+            'SELECT tag_id FROM topic_tags WHERE topic_id = ?', (topic_id,)
+        )
+        linked_tag_ids = [row[0] for row in self.cursor.fetchall()]
+        self.cursor.execute(
+            'DELETE FROM topic_tags WHERE topic_id = ?', (topic_id,)
+        )
+        for tag_id in linked_tag_ids:
+            self.cursor.execute('''
+                UPDATE tags SET topic_count = (
+                    SELECT COUNT(*) FROM topic_tags WHERE tag_id = ?
+                ) WHERE tag_id = ?
+            ''', (tag_id, tag_id))
+
+        for table in self.TOPIC_CHILD_TABLES:
+            self.cursor.execute(
+                f'DELETE FROM {table} WHERE topic_id = ?', (topic_id,)
+            )
+
     def import_topic_data(self, topic_data: Dict[str, Any]) -> bool:
-        """导入话题数据到数据库"""
+        """导入话题数据到数据库（单条话题整体事务，失败不留任何残留）。"""
         try:
             topic_id = topic_data.get('topic_id')
             group_info = topic_data.get('group', {})
-            
+
             if not topic_id:
                 return False
-            
 
-            
-            # 导入群组信息
-            if group_info:
-                self._upsert_group(group_info)
-            
-            # 导入话题相关的所有用户信息
-            self._import_all_users(topic_data)
-            
-            # 导入话题信息
-            self._upsert_topic(topic_data)
-            
-            # 导入话题内容(talk)
-            if 'talk' in topic_data and topic_data['talk']:
-                self._upsert_talk(topic_id, topic_data['talk'])
-            
-            # 导入文章信息（如果话题类型是文章）
-            self._import_articles(topic_id, topic_data)
-            
-            # 导入图片信息
-            self._import_images(topic_id, topic_data)
-            
-            # 导入点赞信息
-            self._import_likes(topic_id, topic_data)
-            
-            # 导入表情点赞信息
-            self._import_like_emojis(topic_id, topic_data)
-            
-            # 导入用户表情点赞信息
-            self._import_user_liked_emojis(topic_id, topic_data)
-            
-            # 导入评论信息
-            if 'show_comments' in topic_data:
-                self._import_comments(topic_id, topic_data['show_comments'])
-            
-            # 导入问题信息
-            if 'question' in topic_data and topic_data['question']:
-                self._upsert_question(topic_id, topic_data['question'])
-            
-            # 导入回答信息
-            if 'answer' in topic_data and topic_data['answer']:
-                self._upsert_answer(topic_id, topic_data['answer'])
-            
-            # 导入标签信息
-            self._import_tags(topic_id, topic_data)
+            with self.transaction("topic_import"):
+                # 先清除该话题的旧子表数据，使重复扫描到同一话题时幂等：
+                # 清库与重新插入在同一 SAVEPOINT 内，中途失败会一起回滚。
+                self._delete_topic_children(topic_id)
 
-            # 导入文件信息
-            if 'talk' in topic_data and topic_data['talk'] and 'files' in topic_data['talk']:
-                self._import_files(topic_id, topic_data['talk']['files'])
-
-            return True
+                # 导入群组信息
+                if group_info:
+                    self._upsert_group(group_info)
             
+                # 导入话题相关的所有用户信息
+                self._import_all_users(topic_data)
+
+                # 导入话题信息
+                self._upsert_topic(topic_data)
+
+                # 导入话题内容(talk)
+                if 'talk' in topic_data and topic_data['talk']:
+                    self._upsert_talk(topic_id, topic_data['talk'])
+
+                # 导入文章信息（如果话题类型是文章）
+                self._import_articles(topic_id, topic_data)
+
+                # 导入图片信息
+                self._import_images(topic_id, topic_data)
+
+                # 导入点赞信息
+                self._import_likes(topic_id, topic_data)
+
+                # 导入表情点赞信息
+                self._import_like_emojis(topic_id, topic_data)
+
+                # 导入用户表情点赞信息
+                self._import_user_liked_emojis(topic_id, topic_data)
+
+                # 导入评论信息
+                if 'show_comments' in topic_data:
+                    self._import_comments(topic_id, topic_data['show_comments'])
+
+                # 导入问题信息
+                if 'question' in topic_data and topic_data['question']:
+                    self._upsert_question(topic_id, topic_data['question'])
+
+                # 导入回答信息
+                if 'answer' in topic_data and topic_data['answer']:
+                    self._upsert_answer(topic_id, topic_data['answer'])
+
+                # 导入标签信息
+                self._import_tags(topic_id, topic_data)
+
+                # 导入文件信息
+                if 'talk' in topic_data and topic_data['talk'] and 'files' in topic_data['talk']:
+                    self._import_files(topic_id, topic_data['talk']['files'])
+
+                return True
+
         except Exception as e:
             print(f"❌ 导入话题数据失败: {e}")
             import traceback
