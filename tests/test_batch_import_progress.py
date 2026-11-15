@@ -167,7 +167,7 @@ class BatchImportAcceptanceTest(unittest.TestCase):
             make_topic(3, "2024-03-01T10:00:00.000+0800"),
             make_topic(4, "2024-02-29T10:00:00.000+0800"),
         ]
-        original_import = self.db.import_topic_data
+        original_import = self.db.import_topic_data_atomic
 
         def flaky_import(topic_data):
             if topic_data["topic_id"] == 4:
@@ -175,7 +175,7 @@ class BatchImportAcceptanceTest(unittest.TestCase):
             return original_import(topic_data)
 
         runner.fetch_batch = lambda wm: second_batch
-        with mock.patch.object(self.db, "import_topic_data",
+        with mock.patch.object(self.db, "import_topic_data_atomic",
                                side_effect=flaky_import):
             r2 = runner.run_batch()
 

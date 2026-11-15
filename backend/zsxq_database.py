@@ -319,74 +319,85 @@ class ZSXQDatabase:
             )
 
     def import_topic_data(self, topic_data: Dict[str, Any]) -> bool:
-        """导入话题数据到数据库（单条话题整体事务，失败不留任何残留）。"""
+        """导入话题数据到数据库（兼容旧入口：返回 bool，异常不外抛）。
+
+        单条话题整体事务，失败不留任何残留。批次作业请改用
+        import_topic_data_atomic，异常直接传播以便整批回滚。
+        """
         try:
-            topic_id = topic_data.get('topic_id')
-            group_info = topic_data.get('group', {})
-
-            if not topic_id:
-                return False
-
-            with self.transaction("topic_import"):
-                # 先清除该话题的旧子表数据，使重复扫描到同一话题时幂等：
-                # 清库与重新插入在同一 SAVEPOINT 内，中途失败会一起回滚。
-                self._delete_topic_children(topic_id)
-
-                # 导入群组信息
-                if group_info:
-                    self._upsert_group(group_info)
-            
-                # 导入话题相关的所有用户信息
-                self._import_all_users(topic_data)
-
-                # 导入话题信息
-                self._upsert_topic(topic_data)
-
-                # 导入话题内容(talk)
-                if 'talk' in topic_data and topic_data['talk']:
-                    self._upsert_talk(topic_id, topic_data['talk'])
-
-                # 导入文章信息（如果话题类型是文章）
-                self._import_articles(topic_id, topic_data)
-
-                # 导入图片信息
-                self._import_images(topic_id, topic_data)
-
-                # 导入点赞信息
-                self._import_likes(topic_id, topic_data)
-
-                # 导入表情点赞信息
-                self._import_like_emojis(topic_id, topic_data)
-
-                # 导入用户表情点赞信息
-                self._import_user_liked_emojis(topic_id, topic_data)
-
-                # 导入评论信息
-                if 'show_comments' in topic_data:
-                    self._import_comments(topic_id, topic_data['show_comments'])
-
-                # 导入问题信息
-                if 'question' in topic_data and topic_data['question']:
-                    self._upsert_question(topic_id, topic_data['question'])
-
-                # 导入回答信息
-                if 'answer' in topic_data and topic_data['answer']:
-                    self._upsert_answer(topic_id, topic_data['answer'])
-
-                # 导入标签信息
-                self._import_tags(topic_id, topic_data)
-
-                # 导入文件信息
-                if 'talk' in topic_data and topic_data['talk'] and 'files' in topic_data['talk']:
-                    self._import_files(topic_id, topic_data['talk']['files'])
-
-                return True
-
+            return self.import_topic_data_atomic(topic_data)
         except Exception as e:
             print(f"❌ 导入话题数据失败: {e}")
             import traceback
             traceback.print_exc()
             return False
+
+    def import_topic_data_atomic(self, topic_data: Dict[str, Any]) -> bool:
+        """单条话题整体事务导入。
+
+        成功返回 True；topic_id 缺失返回 False；任何写库异常都会先回滚
+        到本话题的 SAVEPOINT（不留残留），再原样抛出，由批次层决定整批撤销。
+        """
+        topic_id = topic_data.get('topic_id')
+        group_info = topic_data.get('group', {})
+
+        if not topic_id:
+            return False
+
+        with self.transaction("topic_import"):
+            # 先清除该话题的旧子表数据，使重复扫描到同一话题时幂等：
+            # 清库与重新插入在同一 SAVEPOINT 内，中途失败会一起回滚。
+            self._delete_topic_children(topic_id)
+
+            # 导入群组信息
+            if group_info:
+                self._upsert_group(group_info)
+
+            # 导入话题相关的所有用户信息
+            self._import_all_users(topic_data)
+
+            # 导入话题信息
+            self._upsert_topic(topic_data)
+
+            # 导入话题内容(talk)
+            if 'talk' in topic_data and topic_data['talk']:
+                self._upsert_talk(topic_id, topic_data['talk'])
+
+            # 导入文章信息（如果话题类型是文章）
+            self._import_articles(topic_id, topic_data)
+
+            # 导入图片信息
+            self._import_images(topic_id, topic_data)
+
+            # 导入点赞信息
+            self._import_likes(topic_id, topic_data)
+
+            # 导入表情点赞信息
+            self._import_like_emojis(topic_id, topic_data)
+
+            # 导入用户表情点赞信息
+            self._import_user_liked_emojis(topic_id, topic_data)
+
+            # 导入评论信息
+            if 'show_comments' in topic_data:
+                self._import_comments(topic_id, topic_data['show_comments'])
+
+            # 导入问题信息
+            if 'question' in topic_data and topic_data['question']:
+                self._upsert_question(topic_id, topic_data['question'])
+
+            # 导入回答信息
+            if 'answer' in topic_data and topic_data['answer']:
+                self._upsert_answer(topic_id, topic_data['answer'])
+
+            # 导入标签信息
+            self._import_tags(topic_id, topic_data)
+
+            # 导入文件信息
+            if 'talk' in topic_data and topic_data['talk'] and 'files' in topic_data['talk']:
+                self._import_files(topic_id, topic_data['talk']['files'])
+
+            return True
     
     def _upsert_group(self, group_data: Dict[str, Any]):
         """插入或更新群组信息"""

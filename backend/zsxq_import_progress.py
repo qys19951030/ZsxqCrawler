@@ -214,13 +214,15 @@ class BatchCrawlRunner:
             if tid and self.db.topic_exists(tid):
                 existing_ids.add(tid)
 
-        # 3. 整批事务：任何一条话题失败，整批回滚
+        # 3. 整批事务：任何一条话题抛异常，保存点回滚整批
         try:
             with self.db.transaction("batch_import"):
                 for topic in topics:
-                    if not self.db.import_topic_data(topic):
+                    # 原子方法失败会抛异常并先回滚该话题的保存点，
+                    # 异常继续向上传播触发整批回滚
+                    if not self.db.import_topic_data_atomic(topic):
                         raise RuntimeError(
-                            f"话题 {topic.get('topic_id')} 导入返回失败"
+                            f"话题 {topic.get('topic_id')} 缺少 topic_id，导入失败"
                         )
 
                 boundary = topics[-1]
