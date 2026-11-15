@@ -148,14 +148,114 @@ class BatchCrawlRunner:
         self,
         db: ZSXQDatabase,
         group_id: int,
-        fetch_batch: Callable[[Optional[str]], Optional[List[Dict[str, Any]]]],
+        fetch_batch: Callable[[Optional[Dict[str, Any]]], Optional[List[Dict[str, Any]]]],
         log: Optional[Callable[[str], None]] = None,
     ):
-        pass
+        """
+        :param fetch_batch: 回调，入参为当前水位（None 表示从头扫），
+            返回话题列表；返回 None 或抛出 BatchBlockedError 表示被平台拦截。
+        """
+        self.db = db
+        self.group_id = int(group_id)
+        self.fetch_batch = fetch_batch
+        self._log = log or (lambda message: None)
+        self.store = ImportProgressStore(db)
+
+    def _record_failure(self, error: Exception) -> Dict[str, Any]:
+        """登记一个失败批次（独立事务），水位保持不动。"""
+        counts = self.store.record_batch_result(self.group_id, success=False)
+        self.db.conn.commit()
+        return {
+            "status": "blocked" if isinstance(error, BatchBlockedError) else "failed",
+            "topics": 0,
+            "new_topics": 0,
+            "updated_topics": 0,
+            "watermark": self.store.get_watermark(self.group_id),
+            "success_batches": counts["success_batches"],
+            "failed_batches": counts["failed_batches"],
+            "error": str(error),
+        }
 
     def run_batch(self) -> Dict[str, Any]:
-        """执行一个批次：抓取 -> 整批事务导入 -> 成功推进水位。"""
-        pass
+        """执行一个批次：抓取 -> 整批事务导入 -> 成功推进水位。
+
+        整批话题在同一个 SAVEPOINT 内导入，任一条失败或抓取被拦截，
+        整批回滚、一条不留，水位停在上一批不动。
+        """
+        watermark = self.store.get_watermark(self.group_id)
+
+        # 1. 抓取批次（被反爬拦下：返回 None 或抛 BatchBlockedError）
+        try:
+            topics = self.fetch_batch(watermark)
+        except BatchBlockedError as exc:
+            self._log(f"🚫 群组 {self.group_id} 批次被平台拦截，本批不计入库: {exc}")
+            return self._record_failure(exc)
+        if topics is None:
+            return self._record_failure(
+                BatchBlockedError("抓取返回空响应，批次按拦截失败处理")
+            )
+        if not topics:
+            self._log(f"📭 群组 {self.group_id} 已无更多话题")
+            return {
+                "status": "exhausted",
+                "topics": 0,
+                "new_topics": 0,
+                "updated_topics": 0,
+                "watermark": watermark,
+                "success_batches": self.store.get_progress(self.group_id)["success_batches"],
+                "failed_batches": self.store.get_progress(self.group_id)["failed_batches"],
+                "error": None,
+            }
+
+        # 2. 写库前统计新增/更新（import_topic_data 本身幂等，此处仅用于汇报）
+        existing_ids = set()
+        for topic in topics:
+            tid = topic.get("topic_id")
+            if tid and self.db.topic_exists(tid):
+                existing_ids.add(tid)
+
+        # 3. 整批事务：任何一条话题失败，整批回滚
+        try:
+            with self.db.transaction("batch_import"):
+                for topic in topics:
+                    if not self.db.import_topic_data(topic):
+                        raise RuntimeError(
+                            f"话题 {topic.get('topic_id')} 导入返回失败"
+                        )
+
+                boundary = topics[-1]
+                boundary_time = boundary.get("create_time")
+                boundary_id = boundary.get("topic_id")
+                if not boundary_time or not boundary_id:
+                    raise RuntimeError(
+                        "批次边界话题缺少 create_time/topic_id，无法推进水位"
+                    )
+                self.store.upsert_watermark(
+                    self.group_id, boundary_time, boundary_id
+                )
+                counts = self.store.record_batch_result(
+                    self.group_id, success=True
+                )
+            self.db.conn.commit()
+        except Exception as exc:
+            # SAVEPOINT 已回滚整批；失败计数单独落盘，水位不变
+            self._log(f"❌ 群组 {self.group_id} 批次导入失败，整批撤销: {exc}")
+            return self._record_failure(exc)
+
+        self._log(
+            f"✅ 群组 {self.group_id} 批次入库 {len(topics)} 条，"
+            f"水位推进至 {boundary_id}"
+        )
+        return {
+            "status": "success",
+            "topics": len(topics),
+            "new_topics": len([t for t in topics if t.get("topic_id") not in existing_ids]),
+            "updated_topics": len([t for t in topics if t.get("topic_id") in existing_ids]),
+            "watermark": self.store.get_watermark(self.group_id),
+            "success_batches": counts["success_batches"],
+            "failed_batches": counts["failed_batches"],
+            "error": None,
+        }
 
     def run(self, max_batches: Optional[int] = None) -> Dict[str, Any]:
         """连续执行批次，直到没有更多数据、被拦或达到上限。"""
