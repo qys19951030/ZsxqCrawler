@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List
 
@@ -255,7 +256,34 @@ class ZSXQDatabase:
         ''')
 
         self.conn.commit()
-    
+
+    @contextmanager
+    def transaction(self, name: str = "zsxq_txn"):
+        """SAVEPOINT 事务上下文。
+
+        正常退出时 RELEASE，异常时 ROLLBACK 到该保存点并重新抛出异常。
+        可嵌套使用：内层回滚不影响外层已执行的语句，批次级事务与
+        单条话题事务可叠加。
+        """
+        self.cursor.execute(f"SAVEPOINT {name}")
+        try:
+            yield self.cursor
+        except Exception:
+            self.cursor.execute(f"ROLLBACK TO SAVEPOINT {name}")
+            self.cursor.execute(f"RELEASE SAVEPOINT {name}")
+            raise
+        else:
+            self.cursor.execute(f"RELEASE SAVEPOINT {name}")
+
+    def topic_exists(self, topic_id: int) -> bool:
+        """判断话题是否已完整入库（topics 表中存在即视为已入库）。"""
+        if not topic_id:
+            return False
+        self.cursor.execute(
+            'SELECT 1 FROM topics WHERE topic_id = ?', (topic_id,)
+        )
+        return self.cursor.fetchone() is not None
+
     def import_topic_data(self, topic_data: Dict[str, Any]) -> bool:
         """导入话题数据到数据库"""
         try:
