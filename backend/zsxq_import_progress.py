@@ -76,15 +76,69 @@ class ImportProgressStore:
 
     def record_batch_result(self, group_id: int, success: bool) -> Dict[str, int]:
         """累加成功/失败批次数，返回更新后的计数。"""
-        pass
+        column = "success_batches" if success else "failed_batches"
+        # 先确保群组行存在（水位字段留空），再做条件累加
+        self.cursor.execute(f'''
+            INSERT INTO {self.TABLE_NAME}
+                (group_id, watermark_time, watermark_topic_id,
+                 success_batches, failed_batches)
+            VALUES (?, NULL, NULL, 0, 0)
+            ON CONFLICT(group_id) DO NOTHING
+        ''', (group_id,))
+        self.cursor.execute(f'''
+            UPDATE {self.TABLE_NAME}
+            SET {column} = {column} + 1,
+                last_batch_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE group_id = ?
+        ''', (group_id,))
+        self.cursor.execute(f'''
+            SELECT success_batches, failed_batches
+            FROM {self.TABLE_NAME} WHERE group_id = ?
+        ''', (group_id,))
+        row = self.cursor.fetchone()
+        return {"success_batches": row[0], "failed_batches": row[1]}
+
+    def _row_to_progress(self, row: tuple) -> Dict[str, Any]:
+        return {
+            "group_id": row[0],
+            "watermark_time": row[1],
+            "watermark_topic_id": row[2],
+            "success_batches": row[3],
+            "failed_batches": row[4],
+            "last_batch_at": row[5],
+            "updated_at": row[6],
+        }
 
     def get_progress(self, group_id: int) -> Dict[str, Any]:
         """返回单个群组的进度视图（水位 + 批次计数）。"""
-        pass
+        self.cursor.execute(f'''
+            SELECT group_id, watermark_time, watermark_topic_id,
+                   success_batches, failed_batches, last_batch_at, updated_at
+            FROM {self.TABLE_NAME} WHERE group_id = ?
+        ''', (group_id,))
+        row = self.cursor.fetchone()
+        if not row:
+            return {
+                "group_id": group_id,
+                "watermark_time": None,
+                "watermark_topic_id": None,
+                "success_batches": 0,
+                "failed_batches": 0,
+                "last_batch_at": None,
+                "updated_at": None,
+            }
+        return self._row_to_progress(row)
 
     def list_progress(self) -> List[Dict[str, Any]]:
         """返回库中所有群组的进度视图。"""
-        pass
+        self.cursor.execute(f'''
+            SELECT group_id, watermark_time, watermark_topic_id,
+                   success_batches, failed_batches, last_batch_at, updated_at
+            FROM {self.TABLE_NAME}
+            ORDER BY group_id
+        ''')
+        return [self._row_to_progress(row) for row in self.cursor.fetchall()]
 
 
 class BatchCrawlRunner:
