@@ -258,5 +258,45 @@ class BatchCrawlRunner:
         }
 
     def run(self, max_batches: Optional[int] = None) -> Dict[str, Any]:
-        """连续执行批次，直到没有更多数据、被拦或达到上限。"""
-        pass
+        """连续执行批次，直到没有更多数据、被拦或达到上限。
+
+        被拦/失败的批次会立即停下，已成功的批次与水位不受影响；
+        进程重启后重新构造 runner 调用本方法即可从水位之后续跑。
+        """
+        totals = {
+            "batches": 0,
+            "success_batches": 0,
+            "failed_batches": 0,
+            "topics": 0,
+            "new_topics": 0,
+            "updated_topics": 0,
+            "stop_reason": None,
+            "last_error": None,
+        }
+        while max_batches is None or totals["batches"] < max_batches:
+            result = self.run_batch()
+            totals["batches"] += 1
+            status = result["status"]
+
+            if status == "success":
+                totals["success_batches"] += 1
+                totals["topics"] += result["topics"]
+                totals["new_topics"] += result["new_topics"]
+                totals["updated_topics"] += result["updated_topics"]
+                continue
+
+            if status == "exhausted":
+                totals["stop_reason"] = "exhausted"
+                break
+
+            # blocked / failed：水位未动，下一轮仍从水位之后取
+            totals["failed_batches"] += 1
+            totals["stop_reason"] = status
+            totals["last_error"] = result.get("error")
+            break
+
+        if totals["stop_reason"] is None:
+            totals["stop_reason"] = "max_batches_reached"
+
+        totals["watermark"] = self.store.get_watermark(self.group_id)
+        return totals
