@@ -704,6 +704,45 @@ class ZSXQInteractiveCrawler:
         # 提交事务
         self.db.conn.commit()
         return stats
+
+    def _make_batch_fetch(self, per_page: int):
+        """构造批次抓取回调：把群组水位翻译成接口的 end_time 分页参数。"""
+        from .zsxq_import_progress import BatchBlockedError
+
+        def fetch_batch(watermark):
+            end_time = watermark["create_time"] if watermark else None
+            data = self.fetch_topics_safe(
+                scope="all", count=per_page,
+                end_time=end_time, is_historical=True,
+            )
+            if not data or not data.get("succeeded"):
+                # 反爬拦截/网络失败：整批按失败处理，水位不动
+                raise BatchBlockedError(
+                    f"话题接口未成功返回 (end_time={end_time})"
+                )
+            topics = data.get("resp_data", {}).get("topics", [])
+            return topics
+
+        return fetch_batch
+
+    def crawl_in_batches(self, max_batches: Optional[int] = None,
+                         per_page: int = 20) -> Dict[str, Any]:
+        """可中断、可续跑的批次采集入口。
+
+        每批为接口一页（per_page 条），整批整体事务生效：
+        任一条话题失败或被平台拦截，整批回滚、水位不动。
+        进程重启后再次调用会从 import_progress 水位之后继续扫描。
+        旧的单条导入入口 import_topic_data 与本方法互不影响。
+        """
+        from .zsxq_import_progress import BatchCrawlRunner
+
+        runner = BatchCrawlRunner(
+            db=self.db,
+            group_id=int(self.group_id),
+            fetch_batch=self._make_batch_fetch(per_page),
+            log=self.log,
+        )
+        return runner.run(max_batches=max_batches)
     
     def crawl_latest(self, count: int = 20) -> Dict[str, int]:
         """爬取最新话题"""
